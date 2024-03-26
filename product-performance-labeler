@@ -1,0 +1,177 @@
+// Loosely based on Flowboost Labelizer 1.1 by Floris de Schrijver
+// spreadsheet config and updated to new Google Ads API & modern ECMAScript by Trevor Anderson
+// Fully updated to use Standard Deviations
+
+// MAKE A COPY AND PUT IN THE URL OF THE SPREADSHEET ON THE NEXT LINE
+var SPREADSHEET_URL = 'YOUR_SPREADSHEET_HERE'; // << make sure you keep the single quotes (')
+
+const START_ROW = 2;
+//
+//
+// Don't Edit After This 
+//
+//
+//
+//
+//
+//
+//
+
+function getConfigFromSpreadsheet() {
+    const ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+    const sheet = ss.getSheetByName('Config');
+    //const data = sheet.getRange('A1:B4').getValues();
+    const data = sheet.getRange('A' + START_ROW + ':' + 'B5').getValues();
+
+    let config = {};
+    data.forEach(row => {
+        const key = row[0].replace(/\s+/g, '').trim().toLowerCase(); // Ensure consistent case
+        config[key] = row[1];
+    });
+    Logger.log(config);
+    return config;
+  
+}
+
+
+
+function main() {
+    const config = getConfigFromSpreadsheet();
+    // assign the variables from the returned config
+    let roasTarget = config.roastarget;
+    let averageCvr = config.averagecvr;
+    let impressionsThreshold = config.impressionthreshold;
+    let lookbackWindow = config.lookbackwindow;
+    Logger.log('ROAS target = ' + roasTarget);
+    Logger.log('Average Conversion Rate = ' + averageCvr)
+    Logger.log('impressions threshhold = '+ impressionsThreshold);
+    Logger.log('Lookback Window is ' + lookbackWindow)
+  // it's important here to get the spreadsheet variables and keep them here in the 
+    let products = getShoppingProducts(roasTarget, averageCvr, impressionsThreshold, lookbackWindow);
+    products.sort(function(a,b) {return a[0] > b[0];});
+    products = products.slice(0, 9999999);
+    updateSpreadsheet(products);
+    Logger.log("Analysis completed, you can now view your spreadsheet: " + SPREADSHEET_URL)
+}
+
+
+function getShoppingProducts(roasTarget, averageCvr, impressionsThreshold, lookbackWindow){
+    const millisecondsPerDay = 1000 * 60 * 60 * 24;
+    const today = new Date();
+    const timeZone = AdsApp.currentAccount().getTimeZone();
+    const toDate = new Date(today.getTime() - 1 * millisecondsPerDay);
+    const fromDate = new Date(today.getTime() - lookbackWindow * millisecondsPerDay);
+   
+      const query = 
+    "SELECT segments.product_item_id, segments.product_title, metrics.impressions, metrics.clicks, metrics.ctr, metrics.cost_micros, metrics.conversions, metrics.conversions_value " +
+    "FROM shopping_performance_view " +
+    "WHERE segments.date BETWEEN '" + 
+          Utilities.formatDate(fromDate, timeZone, 'yyyy-MM-dd') + "' AND '" + 
+          Utilities.formatDate(toDate, timeZone, 'yyyy-MM-dd') + "' " +
+    "AND segments.product_item_id IS NOT NULL AND segments.product_title IS NOT NULL"; // Added line
+    Logger.log(query);
+
+        //from there we need to send the query and parse this thing
+    let products = []; //empty product array
+    let productCount = 0;// init count
+    const report = AdsApp.report(query);
+    const rows = report.rows();
+    Logger.log("Query successful, fetching data, this may take a minute depending on the number of products...")
+    while (rows.hasNext()) {
+        let row = rows.next();
+      
+     
+        let item = (row['segments.product_item_id']);
+
+        let itemId = correctCapitalization(item);
+         
+        let itemTitle = row['segments.product_title'];
+        
+          let impressions = parseInt(row['metrics.impressions']);
+          let clicks = parseInt(row['metrics.clicks']);
+          let ctr = parseFloat(row['metrics.ctr']);
+          let costInMicros = parseFloat(row['metrics.cost_micros']);
+          let conversions = parseFloat(row['metrics.conversions']);
+          let conversionValue = parseFloat(row['metrics.conversions_value']);
+
+          let cost = costInMicros / 1000000; // Convert to main currency units. The currency sign can be edited within the spreadsheet. 
+
+          let conversionValuePerCost = conversionValue / cost; 
+          if (isNaN(conversionValuePerCost)){
+              conversionValuePerCost = 0;
+        }
+// now we're going to run some analysis on the products to put them into bucket types, based on some basic analysis of the data. We want simple, hard fast categories
+// as the idea here is that as products' performance changes we'll see them move into different buckets. 
+
+     let productAverageCategory = ''; //init empty bucket types
+        if (clicks > ( 300 / averageCvr ) && conversionValuePerCost >= roasTarget + 1) {
+            productAverageCategory = 'surpasses-threshold';
+        } else if (clicks >= ( 100 / averageCvr ) && conversionValuePerCost >= roasTarget){
+            productAverageCategory = 'above-threshold';
+        } else if (conversionValuePerCost >= roasTarget - 1) { 
+            productAverageCategory = 'near-threshold';
+        } else if (impressions < impressionsThreshold){
+            productAverageCategory = 'no-threshold';
+        } else if (clicks >= (50 / averageCvr ) && conversionValuePerCost <= (roasTarget / 2)) {
+            productAverageCategory = 'far-below-threshold'
+        
+        } else {
+            productAverageCategory = 'below-threshold';
+        }
+        products.push([itemId, itemTitle, impressions, clicks, cost, conversions, conversionValue, conversionValuePerCost, productAverageCategory])
+        productCount++;
+        
+        
+    }       
+    
+  
+  Logger.log(productCount.toString() + ' products successfully categorized');
+  return products;
+}
+
+
+
+function updateSpreadsheet(data){ 
+    const ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+    const sheet = ss.getSheetByName('Product Data');
+    const lastRow = sheet.getMaxRows();
+    sheet.getRange('A2:I' + lastRow).clearContent();
+    const finalRow = START_ROW + data.length - 1;
+    const range = sheet.getRange('A' + START_ROW + ':' + 'I' + finalRow);
+    if (data.length > 0) {
+        range.setValues(data);
+    }
+    return;
+}
+
+
+function correctCapitalization(itemId) {
+    // Check if itemId contains 'shopify'
+  if (!itemId) {
+        return 'error'; // Or handle the undefined case as appropriate for your needs
+        Logger.log("The itemId is invalid");
+    }
+    if (itemId.includes('shopify')) {
+        // Split the itemId by underscore
+        let parts = itemId.split('_');
+
+        // Capitalize specific parts (e.g., second part)
+        if (parts[1]) {
+            parts[1] = parts[1].toUpperCase();
+        }
+
+        // Rejoin the parts back into a string
+        return parts.join('_');a
+    }
+
+    // If itemId does not contain 'shopify', return it unchanged
+    return itemId;
+}
+
+
+
+
+
+    
+
+  
